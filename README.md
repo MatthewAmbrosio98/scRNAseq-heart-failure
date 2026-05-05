@@ -9,6 +9,9 @@ This project performs a single-cell RNA sequencing (scRNA-seq) analysis comparin
 ### final_project_genom_II.Rmd
 Main R Markdown file containing the full analysis (Introduction, Methods, Results, Discussion).
 
+### final_project_genom_II_updated.Rmd
+R Markdown that should be used for knitting purposes (the previous one did not have the correct data paths)
+
 ### final_project_genom_II.html
 Knitted output of the R Markdown file.
 
