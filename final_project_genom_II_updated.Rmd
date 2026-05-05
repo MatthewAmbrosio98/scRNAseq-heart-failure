@@ -1,0 +1,879 @@
+---
+title: "Single-Cell RNA Sequencing Identifies Cell-Type–Specific Changes in Heart Failure"
+author: "Matthew Ambrosio"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+  pdf_document: default
+bibliography: references.bib
+---
+
+
+# Single-Cell RNA Sequencing Identifies Cell-Type–Specific Changes in Heart Failure
+By: Matthew Ambrosio
+
+https://github.com/MatthewAmbrosio98/scRNAseq-heart-failure
+
+# Introduction
+
+Heart disease is the leading cause of death in the world, accounting for approximately 13% of global deaths in 2025 [@WHO_GHE]. More specifically, heart failure is a chronic condition where the heart muscle is weakened or stiffened, and is often a result of heart disease. While many epidemiologic studies have been conducted, aiming to assess certain demographics that are at high risk for heart disease and/or heart failure (such as certain ethnic groups or people with high body mass indexes), the genetic and cellular causes of heart failure are still being explored. In this study, we will assess RNA-sequencing data on a healthy homo sapien donor and a heart failure homo sapien donor in order to evaluate key cell-type specific transcriptional differences between the healthy and heart disease sample. 
+
+We will be using sRNA-sequencing data from dataset GSE183852 [@GSE183852]. This dataset consists of single-cell and single-nucleus RNA sequencing data generated using the 10x Genomics platform from 45 human subjects. It includes healthy donor heart tissue (control) and heart failure tissue (exposure). Raw sequencing FASTQ files are available at SRP336428 ( https://www.ncbi.nlm.nih.gov/Traces/study/?acc=SRP336428&o=acc_s%3Aa ) . The goal of the study, as stated in the original publication, is to “identify cell specific transcriptional signatures of heart failure and reveal the emergence of disease associated cell states”. For computation purposes, we will only be using one healthy and one heart failure donor. In the original full publication, the authors found many transcriptional differences between the healthy and heart failure samples, such as Endothelial cells displaying global transcriptional shifts. In this analysis, we aim to replicate similar findings, but in only one sample of healthy and heart disease, opposed to using all 45 samples from the original data [@litvinukova2022]. 
+
+# Methods
+
+Single-cell RNA sequencing data were analyzed using the Seurat workflow in R. Raw gene expression matrices from one healthy donor and one heart failure donor were imported and converted into Seurat objects. Quality control filtering was performed to remove low-quality cells based on gene counts and mitochondrial gene expression. Data pre-processing was performed on Athena high power computer, and scripts used for data processing can be found in the cellranger_run.sh and download_process.sh files. 
+
+The datasets were then merged and normalized, and highly variable genes were identified. Dimensionality reduction was performed using principal component analysis (PCA), followed by batch correction and data integration using Harmony to account for differences between samples.
+
+Cells were clustered using a graph-based clustering approach, and clusters were visualized using Uniform Manifold Approximation and Projection (UMAP). Cluster-specific marker genes were identified to characterize each cluster.
+
+Cell type annotation was performed by combining reference-based predictions from SingleR with cluster-specific marker genes and biological knowledge of human heart tissue. Final cell type labels were assigned based on the most biologically plausible annotations.
+
+Differential expression analysis was conducted within the three largest clusters to compare gene expression between heart failure and healthy samples. Functional enrichment analysis of significantly differentially expressed genes was performed using Gene Ontology (GO) and Kyoto Encyclopedia of Genes and Genomes (KEGG) pathways via the clusterProfiler package. Results were visualized using dot plots and cnetplots.
+
+# Results
+
+## Seurat preprocessing, QC, integration, clustering, and annotation
+
+
+```{r setup, include=FALSE}
+
+# Install BiocManager if needed
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+# Install required Bioconductor packages if missing
+pkgs <- c("SingleR", "celldex", "SingleCellExperiment")
+
+for (p in pkgs) {
+  if (!requireNamespace(p, quietly = TRUE)) {
+    BiocManager::install(p, ask = FALSE, update = FALSE)
+  }
+}
+
+# Load libraries
+library(SingleR)
+library(knitr)
+library(celldex)
+library(SingleCellExperiment)
+
+# Load libraries
+library(dplyr)
+library(hdf5r)
+library(Seurat)
+library(harmony)
+# -------------------------------
+# Load data from Cell Ranger output
+# -------------------------------
+
+# Heart Failure sample
+hf_counts <- Read10X_h5("data/filtered_feature_bc_matrix.h5")
+hf <- CreateSeuratObject(hf_counts, project = "HF")
+
+# Healthy sample
+healthy_counts <- Read10X_h5("data/healthy_feature_bc_matrix.h5")
+healthy <- CreateSeuratObject(healthy_counts, project = "Healthy")
+
+# -------------------------------
+# Add metadata (IMPORTANT for integration)
+# -------------------------------
+
+hf$condition <- "HF"
+healthy$condition <- "Healthy"
+
+# -------------------------------
+# Quick checks
+# -------------------------------
+
+hf
+healthy
+
+dim(hf)
+dim(healthy)
+
+head(rownames(hf))
+head(colnames(hf))
+
+summary(hf$nCount_RNA)
+summary(hf$nFeature_RNA)
+
+summary(healthy$nCount_RNA)
+summary(healthy$nFeature_RNA)
+```
+
+
+
+Quality control  metrics were assessed for both samples, including the number of detected genes, total RNA counts, and percent mitochondrial reads (Figure 1).
+
+# Figure 1
+
+```{r qc-metrics, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=4}
+# Calculate percent mitochondrial reads
+hf[["percent.mt"]] <- PercentageFeatureSet(hf, pattern = "^MT-")
+healthy[["percent.mt"]] <- PercentageFeatureSet(healthy, pattern = "^MT-")
+
+# Violin plots for QC metrics
+VlnPlot(hf, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(healthy, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+# Plot percent.mt alone so the y-axis is easy to interpret
+VlnPlot(hf, features = "percent.mt")
+VlnPlot(healthy, features = "percent.mt")
+
+# Scatter plots for QC assessment
+FeatureScatter(hf, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+FeatureScatter(hf, feature1 = "nCount_RNA", feature2 = "percent.mt")
+
+FeatureScatter(healthy, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+FeatureScatter(healthy, feature1 = "nCount_RNA", feature2 = "percent.mt")
+
+# Summaries of mitochondrial percentage
+summary(hf$percent.mt)
+summary(healthy$percent.mt)
+
+```
+Most cells exhibited moderate gene counts and low mitochondrial percentages, with a small subset of cells showing elevated mitochondrial expression consistent with low-quality or stressed cells. Based on these distributions, cells with greater than 10% mitochondrial reads were removed prior to downstream analysis.
+
+```{r qc-filtering, include=FALSE}
+# Apply QC filtering
+
+hf <- subset(hf, subset = 
+               nFeature_RNA > 200 & 
+               nFeature_RNA < 6000 & 
+               percent.mt < 10)
+
+healthy <- subset(healthy, subset = 
+                    nFeature_RNA > 200 & 
+                    nFeature_RNA < 6000 & 
+                    percent.mt < 10)
+
+# Check dimensions after filtering
+dim(hf)
+dim(healthy)
+
+```
+
+After QC filtering, 11,611 HF cells and 13,526 healthy cells remained for downstream analysis, indicating that most cells passed quality control while low-quality outliers were removed.
+
+```{r qc-filtering-fix, include=FALSE}
+# Recalculate percent.mt (needed if objects were reloaded)
+hf[["percent.mt"]] <- PercentageFeatureSet(hf, pattern = "^MT-")
+healthy[["percent.mt"]] <- PercentageFeatureSet(healthy, pattern = "^MT-")
+
+# Apply QC filtering
+hf <- subset(
+  hf,
+  subset = nFeature_RNA > 200 &
+           nFeature_RNA < 6000 &
+           percent.mt < 10
+)
+
+healthy <- subset(
+  healthy,
+  subset = nFeature_RNA > 200 &
+           nFeature_RNA < 6000 &
+           percent.mt < 10
+)
+
+# Check filtered dimensions
+dim(hf)
+dim(healthy)
+
+
+```
+
+
+
+
+
+The filtered heart failure and healthy datasets were merged into a single object for joint analysis. Gene expression data were normalized and highly variable genes were identified prior to dimensionality reduction. Principal component analysis (PCA) was performed to capture major sources of variation in the data (Figure 2). To account for differences between samples, batch correction and integration were performed using Harmony.
+
+
+
+```{r merge-preprocess-harmony, include=FALSE}
+# -------------------------------
+# Reapply QC filtering to the raw objects
+# -------------------------------
+
+hf <- subset(
+  hf,
+  subset = nFeature_RNA > 200 &
+           nFeature_RNA < 6000 &
+           percent.mt < 10
+)
+
+healthy <- subset(
+  healthy,
+  subset = nFeature_RNA > 200 &
+           nFeature_RNA < 6000 &
+           percent.mt < 10
+)
+
+# Check filtered dimensions
+dim(hf)
+dim(healthy)
+
+# -------------------------------
+# Merge the filtered datasets
+# -------------------------------
+
+combined <- merge(hf, y = healthy, add.cell.ids = c("HF", "Healthy"))
+
+# Confirm sample counts after filtering
+combined
+table(combined$condition)
+
+# -------------------------------
+# Standard Seurat preprocessing
+# -------------------------------
+
+# Normalize gene expression values
+combined <- NormalizeData(combined)
+
+# Identify highly variable genes
+combined <- FindVariableFeatures(combined, selection.method = "vst", nfeatures = 2000)
+
+# Visualize variable features
+top10 <- head(VariableFeatures(combined), 10)
+
+plot1 <- VariableFeaturePlot(combined)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot2
+
+# Scale the data
+combined <- ScaleData(combined)
+
+# Run PCA
+combined <- RunPCA(combined)
+
+# Save elbow plot to file in case inline plotting is unstable in RStudio
+pdf("elbowplot.pdf")
+ElbowPlot(combined)
+dev.off()
+
+# Show top genes contributing to the first PCs
+print(combined[["pca"]], dims = 1:5, nfeatures = 5)
+
+# -------------------------------
+# Harmony integration
+# -------------------------------
+
+library(harmony)
+
+combined <- RunHarmony(combined, group.by.vars = "condition")
+
+# Check available reductions
+Reductions(combined)
+
+```
+
+PCA identified major sources of variation corresponding to stromal, endothelial, and immune cells. 
+
+
+
+
+Cells were clustered using the Harmony-integrated embeddings, and clusters were visualized using UMAP (Figure 2). Distinct clusters were observed, representing major cardiac cell populations. When split by condition, cells from both heart failure and healthy samples were distributed across clusters, indicating successful integration and minimal batch effects between samples.
+
+# Figure 2
+
+```{r clustering-umap, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=6}
+# -------------------------------
+# Clustering using Harmony reduction
+# -------------------------------
+
+# Find neighbors (IMPORTANT: use harmony, not PCA)
+combined <- FindNeighbors(combined, reduction = "harmony", dims = 1:20)
+
+# Run clustering (start with moderate resolution)
+combined <- FindClusters(combined, resolution = 0.5)
+
+# -------------------------------
+# UMAP visualization
+# -------------------------------
+
+# Run UMAP using Harmony embedding
+combined <- RunUMAP(combined, reduction = "harmony", dims = 1:20)
+
+# Plot UMAP colored by cluster
+DimPlot(combined, reduction = "umap", label = TRUE)
+
+# Plot UMAP split by condition (REQUIRED for assignment)
+DimPlot(combined, reduction = "umap", split.by = "condition")
+
+
+```
+
+UMAP visualization after Harmony integration showed that cells from HF and healthy samples overlapped well across clusters, indicating successful correction of batch effects and preservation of biological structure.
+
+
+Cluster-specific marker genes were identified to help characterize each cluster and guide cell type annotation. Top marker genes showed distinct transcriptional programs across clusters, including endothelial, stromal/fibroblast, and immune-associated signatures. Top marker genes for each cluster are shown in Table 1.
+
+# Table 1
+
+```{r markers, echo=FALSE, message=FALSE, warning=FALSE}
+# Set identities to cluster labels
+Idents(combined) <- combined$seurat_clusters
+
+# Rejoin RNA layers before differential expression
+combined[["RNA"]] <- JoinLayers(combined[["RNA"]])
+
+# Find marker genes for each cluster
+markers <- FindAllMarkers(
+  combined,
+  assay = "RNA",
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25
+)
+
+# Top 5 markers per cluster
+top_markers <- markers %>%
+  group_by(cluster) %>%
+  slice_max(order_by = avg_log2FC, n = 5) %>%
+  ungroup()
+
+top_markers_clean <- top_markers %>%
+  select(cluster, gene, avg_log2FC, pct.1, pct.2)
+
+knitr::kable(head(top_markers_clean, 30))
+
+```
+
+
+Cluster-specific marker genes supported biologically meaningful annotations. For example, endothelial markers such as CLDN5 and CA4, immune markers such as CD3D and IL1B, and cardiomyocyte markers such as ACTC1 and TNNC1 were identified in distinct clusters.
+
+
+SingleR was used to generate reference-based cell type predictions for each cell, which were then summarized at the cluster level.Final cell type labels were determined by integrating SingleR predictions with cluster-specific marker genes and biological knowledge of heart tissue. Several clusters were initially labeled by SingleR as chondrocytes or tissue stem cells; however, these labels are not biologically plausible in adult human heart tissue, as seen in the primary paper [@litvinukova2022]. These clusters instead expressed extracellular matrix-related genes (i.e., LTBP2, CILP), consistent with fibroblast or stromal cell populations, and were therefore reassigned as fibroblasts/stromal cells.
+
+Endothelial clusters were strongly supported by both SingleR and marker genes such as CLDN5, CA4, and PLVAP. Immune populations were also clearly identified, including monocytes/macrophages (IL1B, IL10) and T cells (CD3D, PRF1). The final annotations therefore reflect biologically plausible heart cell populations rather than relying solely on reference-based prediction (Figure 3). 
+
+# Figure 3
+
+```{r singler-annotation, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=6}
+# Convert Seurat object to SingleCellExperiment
+sce <- as.SingleCellExperiment(combined, assay = "RNA")
+
+# Load human reference dataset
+ref <- celldex::HumanPrimaryCellAtlasData()
+
+# Run SingleR
+singler_results <- SingleR(
+  test = sce,
+  ref = ref,
+  labels = ref$label.main
+)
+
+# Add SingleR labels to Seurat metadata
+combined$SingleR_label <- singler_results$labels
+
+# Summarize SingleR labels within each Seurat cluster
+singler_by_cluster <- combined@meta.data %>%
+  count(seurat_clusters, SingleR_label) %>%
+  group_by(seurat_clusters) %>%
+  mutate(prop = n / sum(n)) %>%
+  arrange(seurat_clusters, desc(prop))
+
+singler_by_cluster
+
+# Dominant SingleR label for each cluster
+dominant_singleR <- singler_by_cluster %>%
+  slice_max(order_by = prop, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+dominant_singleR
+
+# Top marker genes for each cluster
+top_markers_for_annotation <- markers %>%
+  group_by(cluster) %>%
+  slice_max(order_by = avg_log2FC, n = 5) %>%
+  summarise(
+    top_marker_genes = paste(gene, collapse = ", "),
+    .groups = "drop"
+  )
+
+top_markers_for_annotation
+
+# Combine dominant SingleR label with top marker genes
+annotation_review <- dominant_singleR %>%
+  mutate(cluster = as.character(seurat_clusters)) %>%
+  left_join(
+    top_markers_for_annotation %>%
+      mutate(cluster = as.character(cluster)),
+    by = "cluster"
+  ) %>%
+  select(
+    cluster,
+    SingleR_label,
+    n,
+    prop,
+    top_marker_genes
+  )
+
+annotation_review
+
+# UMAP labeled by raw SingleR predictions
+DimPlot(
+  combined,
+  reduction = "umap",
+  group.by = "SingleR_label",
+  label = TRUE,
+  repel = TRUE
+) +
+  NoLegend()
+
+# Raw SingleR labels split by condition
+DimPlot(
+  combined,
+  reduction = "umap",
+  group.by = "SingleR_label",
+  split.by = "condition"
+)
+
+```
+
+
+
+
+Final annotation identified major heart-relevant cell populations, including fibroblast/stromal cells, endothelial cells, and immune populations such as monocytes/macrophages and T cells. While SingleR initially assigned some clusters to cell types not typically present in heart tissue (i.e. chondrocytes or tissue stem cells), these clusters were re-evaluated using their marker genes and reassigned to biologically plausible populations, primarily fibroblast/stromal cells  [@litvinukova2022] (Figure 4).
+
+The final annotated UMAP therefore reflects cell types consistent with known heart biology, providing a more accurate and interpretable summary of the integrated dataset.
+
+# Figure 4
+
+```{r annotation, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=6}
+# Final curated labels based on:
+# SingleR + marker genes + heart biology
+
+final_labels <- c(
+  "0" = "Fibroblasts/Stromal",
+  "1" = "Endothelial cells",
+  "2" = "Fibroblasts/Stromal",
+  "3" = "Fibroblasts/Stromal",
+  "4" = "Endothelial cells",
+  "5" = "Endothelial cells",
+  "6" = "Endothelial cells",
+  "7" = "Monocytes/Macrophages",
+  "8" = "T cells",
+  "9" = "Endothelial cells"
+)
+
+# Add to metadata
+combined$final_celltype <- unname(final_labels[as.character(combined$seurat_clusters)])
+
+# Check mapping
+table(combined$seurat_clusters, combined$final_celltype)
+
+# Plot
+DimPlot(
+  combined,
+  reduction = "umap",
+  group.by = "final_celltype",
+  label = TRUE,
+  repel = TRUE
+)
+
+DimPlot(
+  combined,
+  reduction = "umap",
+  group.by = "final_celltype",
+  split.by = "condition"
+)
+
+# Save
+saveRDS(combined, "combined_step3_annotated.rds")
+
+
+```
+
+
+
+
+
+## Differential expression and functional enrichment
+
+The three largest clusters were selected for downstream differential expression and enrichment analysis. These included two fibroblast/stromal clusters and one endothelial cell cluster, allowing comparison of heart failure and healthy cells within major cardiac cell populations. (Table 2)
+
+# Table 2
+
+```{r de-setup, include=FALSE}
+library(Seurat)
+library(dplyr)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(ggplot2)
+
+#combined <- readRDS("combined_step3_annotated.rds")
+
+table(Idents(combined))
+table(combined$condition)
+
+# Cluster-to-cell-type labels from prior annotation step
+cluster_names <- c(
+  "0" = "Fibroblasts/Stromal",
+  "1" = "Endothelial cells",
+  "2" = "Fibroblasts/Stromal",
+  "3" = "Fibroblasts/Stromal",
+  "4" = "Endothelial cells",
+  "5" = "Endothelial cells",
+  "6" = "Endothelial cells",
+  "7" = "Monocytes/Macrophages",
+  "8" = "T cells",
+  "9" = "Endothelial cells"
+)
+```
+
+
+
+
+```{r de-identify-top-clusters, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Set identities to original Seurat clusters
+Idents(combined) <- combined$seurat_clusters
+
+# Identify top 3 largest clusters
+cluster_sizes <- sort(table(Idents(combined)), decreasing = TRUE)
+top3_clusters <- names(cluster_sizes)[1:3]
+
+# Create table showing cluster numbers and cell-type names
+top3_cluster_table <- data.frame(
+  cluster = top3_clusters,
+  cell_type = unname(cluster_names[top3_clusters]),
+  n_cells = as.integer(cluster_sizes[top3_clusters])
+)
+
+# Print all cluster sizes
+cluster_sizes
+
+# Show top 3 clusters with cell-type names
+top3_cluster_table
+
+# Check condition balance within top 3 clusters
+table(Idents(combined), combined$condition)[top3_clusters, ]
+```
+
+
+Differential expression analysis identified numerous genes that were significantly upregulated and downregulated between heart failure and healthy samples within the three largest clusters. Several genes associated with extracellular matrix structure and remodeling, such as ASPN, BGN, and LUM, were upregulated in HF, while others showed decreased expression. These results indicate substantial transcriptional differences between conditions, reflecting underlying changes in cellular function across clusters. (Table 3)
+
+# Table 3
+
+
+```{r de-differential-expression-top3, echo=FALSE, message=FALSE, warning=FALSE}
+# Make sure RNA layers are joined for DE
+combined[["RNA"]] <- JoinLayers(combined[["RNA"]])
+
+# Create output folder
+dir.create("DE_results", showWarnings = FALSE)
+
+# Run HF vs Healthy DE within each of the top 3 clusters
+de_results <- list()
+
+for (clust in top3_clusters) {
+  
+  # Get cell-type name for this cluster
+  cell_type <- cluster_names[clust]
+  file_label <- paste0("cluster_", clust, "_", gsub("[^A-Za-z0-9]+", "_", cell_type))
+  
+  # Subset cells from one cluster
+  cluster_obj <- subset(combined, idents = clust)
+  
+  # Set identities to condition for HF vs Healthy comparison
+  Idents(cluster_obj) <- cluster_obj$condition
+  
+  # Differential expression: HF compared with Healthy
+  de <- FindMarkers(
+    cluster_obj,
+    ident.1 = "HF",
+    ident.2 = "Healthy",
+    assay = "RNA",
+    test.use = "wilcox",
+    min.pct = 0.25,
+    logfc.threshold = 0.25
+  )
+  
+  # Add gene, cluster, and cell-type columns
+  de$gene <- rownames(de)
+  de$cluster <- clust
+  de$cell_type <- unname(cell_type)
+  
+  # Save result in list
+  de_results[[paste0("cluster_", clust)]] <- de
+  
+  # Export full DE table with cell-type name
+  write.csv(
+    de,
+    file = paste0("DE_results/", file_label, "_HF_vs_Healthy_DE.csv"),
+    row.names = FALSE
+  )
+}
+
+# Combine all DE results into one table
+all_de_results <- bind_rows(de_results)
+
+# View top DE genes per cluster
+top_de_genes <- all_de_results %>%
+  group_by(cluster, cell_type) %>%
+  arrange(p_val_adj, desc(abs(avg_log2FC))) %>%
+  slice_head(n = 10) %>%
+  ungroup()
+
+top_de_genes
+```
+
+
+
+The volcano plot for Cluster 0, annotated as fibroblast/stromal cells, shows widespread transcriptional changes between heart failure and healthy samples. Numerous genes show both strong statistical significance and large effect sizes, indicating that heart failure is associated with substantial upregulation and downregulation of gene expression in this stromal population (Figure 5)
+
+# Figure 5
+
+```{r de-volcano-plot-cluster0, echo=FALSE, message=FALSE, warning=FALSE, fig.width=8, fig.height=6}
+# Volcano plot for Cluster 0, labeled by cell type
+de0 <- de_results[["cluster_0"]]
+
+cluster0_label <- paste0("Cluster 0 (", cluster_names["0"], ")")
+
+ggplot(de0, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+  geom_point(alpha = 0.5) +
+  geom_vline(xintercept = c(-0.25, 0.25), linetype = "dashed", color = "red") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "blue") +
+  ggtitle(paste0("Volcano Plot - ", cluster0_label, " HF vs Healthy")) +
+  xlab("Log2 Fold Change") +
+  ylab("-log10 Adjusted P-value")
+```
+
+
+
+
+```{r de-enrichment-analysis, include=FALSE}
+# Create folder for enrichment results
+dir.create("Enrichment_results", showWarnings = FALSE)
+
+enrichment_results <- list()
+
+for (clust in top3_clusters) {
+  
+  # Get cell-type name and labels
+  cell_type <- cluster_names[clust]
+  cluster_label <- paste0("Cluster ", clust, " (", cell_type, ")")
+  file_label <- paste0("cluster_", clust, "_", gsub("[^A-Za-z0-9]+", "_", cell_type))
+  
+  # Get DE results for this cluster
+  de <- de_results[[paste0("cluster_", clust)]]
+  
+  # Filter significant genes
+  sig_genes <- de %>%
+    filter(p_val_adj < 0.05)
+  
+  # Convert gene symbols to ENTREZ IDs
+  gene_df <- bitr(
+    sig_genes$gene,
+    fromType = "SYMBOL",
+    toType = "ENTREZID",
+    OrgDb = org.Hs.eg.db
+  )
+  
+  # Remove duplicates
+  gene_ids <- unique(gene_df$ENTREZID)
+  
+  # -------------------------------
+  # GO Enrichment
+  # -------------------------------
+  ego <- enrichGO(
+    gene = gene_ids,
+    OrgDb = org.Hs.eg.db,
+    ont = "BP",
+    pAdjustMethod = "BH",
+    qvalueCutoff = 0.05,
+    readable = TRUE
+  )
+  
+  # Save GO results
+  write.csv(
+    as.data.frame(ego),
+    file = paste0("Enrichment_results/", file_label, "_GO.csv"),
+    row.names = FALSE
+  )
+  
+  # Plot GO dotplot + cnetplot
+  if (nrow(as.data.frame(ego)) > 0) {
+    pdf(paste0("Enrichment_results/", file_label, "_GO_dotplot.pdf"), width = 10, height = 7)
+    print(dotplot(ego, showCategory = 15) +
+            ggtitle(paste(cluster_label, "GO Enrichment")))
+    dev.off()
+    
+    pdf(paste0("Enrichment_results/", file_label, "_GO_cnetplot.pdf"), width = 12, height = 10)
+    print(cnetplot(ego, showCategory = 5) +
+            ggtitle(paste(cluster_label, "GO cnetplot")))
+    dev.off()
+  }
+  
+  # -------------------------------
+  # KEGG Enrichment
+  # -------------------------------
+  kegg <- enrichKEGG(
+    gene = gene_ids,
+    organism = "hsa",
+    pAdjustMethod = "BH",
+    qvalueCutoff = 0.05
+  )
+  
+  # Save KEGG results
+  write.csv(
+    as.data.frame(kegg),
+    file = paste0("Enrichment_results/", file_label, "_KEGG.csv"),
+    row.names = FALSE
+  )
+  
+  # Plot KEGG dotplot + cnetplot
+  if (nrow(as.data.frame(kegg)) > 0) {
+    pdf(paste0("Enrichment_results/", file_label, "_KEGG_dotplot.pdf"), width = 10, height = 7)
+    print(dotplot(kegg, showCategory = 15) +
+            ggtitle(paste(cluster_label, "KEGG Enrichment")))
+    dev.off()
+    
+    pdf(paste0("Enrichment_results/", file_label, "_KEGG_cnetplot.pdf"), width = 12, height = 10)
+    print(cnetplot(kegg, showCategory = 5) +
+            ggtitle(paste(cluster_label, "KEGG cnetplot")))
+    dev.off()
+  }
+  
+  # Store results
+  enrichment_results[[paste0("cluster_", clust)]] <- list(
+    GO = ego,
+    KEGG = kegg,
+    cell_type = unname(cell_type)
+  )
+}
+```
+
+
+
+
+
+```{r de-enrichment-summary, echo=FALSE, message=FALSE, warning=FALSE}
+# Summarize number of enriched GO and KEGG terms per cluster/cell type
+enrichment_summary <- data.frame(
+  cluster = top3_clusters,
+  cell_type = unname(cluster_names[top3_clusters]),
+  GO_terms = sapply(top3_clusters, function(clust) {
+    nrow(as.data.frame(enrichment_results[[paste0("cluster_", clust)]]$GO))
+  }),
+  KEGG_terms = sapply(top3_clusters, function(clust) {
+    nrow(as.data.frame(enrichment_results[[paste0("cluster_", clust)]]$KEGG))
+  })
+)
+
+enrichment_summary
+```
+
+
+
+Enrichment analysis identified numerous significantly enriched GO and KEGG pathways across all three clusters, with the largest number of enriched terms observed in fibroblast/stromal populations (Table 4).
+
+# Table 4
+
+```{r de-display-top-enrichment-results, echo=FALSE, message=FALSE, warning=FALSE}
+# Extract top GO and KEGG terms for each cluster/cell type
+top_go_results <- dplyr::bind_rows(lapply(top3_clusters, function(clust) {
+  as.data.frame(enrichment_results[[paste0("cluster_", clust)]]$GO) %>%
+    dplyr::arrange(p.adjust) %>%
+    dplyr::slice_head(n = 10) %>%
+    dplyr::mutate(
+      cluster = clust,
+      cell_type = unname(cluster_names[clust])
+    )
+}))
+
+top_kegg_results <- dplyr::bind_rows(lapply(top3_clusters, function(clust) {
+  as.data.frame(enrichment_results[[paste0("cluster_", clust)]]$KEGG) %>%
+    dplyr::arrange(p.adjust) %>%
+    dplyr::slice_head(n = 10) %>%
+    dplyr::mutate(
+      cluster = clust,
+      cell_type = unname(cluster_names[clust])
+    )
+}))
+
+# Show top GO terms
+top_go_results %>%
+  dplyr::select(cluster, cell_type, ID, Description, GeneRatio, BgRatio, p.adjust, Count)
+
+# Show top KEGG pathways
+top_kegg_results %>%
+  dplyr::select(cluster, cell_type, ID, Description, GeneRatio, BgRatio, p.adjust, Count)
+```
+
+
+Functional enrichment analysis showed that the fibroblast/stromal clusters, corresponding to clusters 0 and 2, were strongly enriched for extracellular matrix organization, extracellular structure organization, collagen metabolic processes, and cell-substrate adhesion. These findings suggest that fibroblast/stromal cells show transcriptional changes consistent with extracellular matrix remodeling and fibrosis in heart failure.
+
+The endothelial cell cluster, corresponding to cluster 1, showed enrichment for endothelial cell migration, regulation of angiogenesis, regulation of vasculature development, actin filament organization, and positive regulation of cell adhesion, suggesting vascular and endothelial adaptation in heart failure.
+
+KEGG pathway analysis across these cell types identified enrichment in PI3K-Akt signaling, focal adhesion, integrin signaling, ECM-receptor interaction, and cytoskeleton-related pathways, all of which are relevant to cardiac remodeling and heart failure progression. (Figure 6)
+
+# Figure 6
+
+```{r de-enrichment-dotplots, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=6}
+# Display GO and KEGG dotplots for each top cluster/cell type
+for (clust in top3_clusters) {
+  
+  cell_type <- cluster_names[clust]
+  cluster_label <- paste0("Cluster ", clust, " (", cell_type, ")")
+  
+  print(
+    dotplot(enrichment_results[[paste0("cluster_", clust)]]$GO, showCategory = 10) +
+      ggtitle(paste(cluster_label, "GO Biological Process Enrichment"))
+  )
+  
+  print(
+    dotplot(enrichment_results[[paste0("cluster_", clust)]]$KEGG, showCategory = 10) +
+      ggtitle(paste(cluster_label, "KEGG Pathway Enrichment"))
+  )
+}
+```
+
+In addition to dotplots, cnetplots were generated to show the genes contributing to enriched GO and KEGG pathways within each cell type (Figure 7)
+
+# Figure 7
+
+```{r de-enrichment-cnetplots, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=8}
+# Display GO and KEGG cnetplots for each top cluster/cell type
+for (clust in top3_clusters) {
+  
+  cell_type <- cluster_names[clust]
+  cluster_label <- paste0("Cluster ", clust, " (", cell_type, ")")
+  
+  print(
+    cnetplot(enrichment_results[[paste0("cluster_", clust)]]$GO, showCategory = 5) +
+      ggtitle(paste(cluster_label, "GO cnetplot"))
+  )
+  
+  print(
+    cnetplot(enrichment_results[[paste0("cluster_", clust)]]$KEGG, showCategory = 5) +
+      ggtitle(paste(cluster_label, "KEGG cnetplot"))
+  )
+}
+```
+
+
+
+
+
+
+
+# Discussion
+
+
+In this study, we analyzed single-cell RNA sequencing data from one healthy donor and one heart failure donor to identify cell-type–specific transcriptional differences associated with heart failure. Overall, our results demonstrated clear differences in gene expression and biological pathways across major cardiac cell populations, particularly within fibroblast/stromal and endothelial cells.
+
+Fibroblast/stromal populations showed strong upregulation of genes and pathways related to extracellular matrix organization and collagen metabolism, consistent with known fibrotic remodeling processes in heart failure. Endothelial cells exhibited enrichment of pathways related to angiogenesis, vascular development, and cell adhesion, suggesting adaptive or pathological changes in the cardiac vasculature. These findings are consistent with prior studies demonstrating that heart failure is characterized by both structural remodeling and vascular dysfunction [@litvinukova2022].
+
+This analysis also highlights the value of integrating reference-based annotation methods such as SingleR with cluster-specific marker genes and biological knowledge. Initial automated annotations included cell types not typically present in adult human heart tissue (such as brain cells), emphasizing the need for careful biological interpretation when assigning cell identities.
+
+A limitation is that this analysis was performed on a single healthy and single heart failure donor, limiting the generalizability of the findings. Future analyses incorporating a larger number of samples would be necessary to validate these findings and better capture inter-individual variability.
+
+In summary, this study demonstrates that single-cell RNA sequencing can identify meaningful, cell-type–specific transcriptional changes associated with heart failure, even in a limited dataset. These results provide insight into the cellular mechanisms underlying heart failure and highlight key pathways involved in cardiac remodeling and disease progression.
+
+
