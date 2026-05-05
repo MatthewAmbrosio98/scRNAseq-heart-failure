@@ -24,6 +24,23 @@ Script used to process raw sequencing data using Cell Ranger.
 ### download_process.sh
 Script used to download and prepare raw data.
 
+## Data Files
+
+This repository includes two Cell Ranger output files in the `data/` directory:
+
+- `filtered_feature_bc_matrix.h5`  
+  - Single-cell gene expression matrix for the heart failure (HF) sample
+
+- `healthy_feature_bc_matrix.h5`  
+  - Single-cell gene expression matrix for the healthy control sample
+
+These files were generated using the 10x Genomics Cell Ranger pipeline from dataset GSE183852.
+
+They are required for reproducibility and are directly loaded in the R Markdown file using:
+
+Read10X_h5("data/filtered_feature_bc_matrix.h5")
+Read10X_h5("data/healthy_feature_bc_matrix.h5")
+
 ## Workflow
 1. Data download and processing using HPC (Athena)
 2. Quality control filtering
